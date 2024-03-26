@@ -13,11 +13,19 @@ import psycopg2
 import pydantic
 import requests
 from dotenv import load_dotenv
+from psycopg2 import InterfaceError, OperationalError
 from psycopg2.extensions import connection as _connection
 from psycopg2.extras import DictCursor
 
 load_dotenv()
 
+dsl = {
+    'dbname': os.environ.get('POSTGRES_DB'),
+    'user': os.environ.get('POSTGRES_USER'),
+    'password': os.environ.get('POSTGRES_PASSWORD'),
+    'host': os.environ.get('DB_HOST'),
+    'port': os.environ.get('DB_PORT'),
+}
 
 @dataclass
 class Film:
@@ -42,11 +50,14 @@ class Film:
 # TODO загрузка по жанрам - ОК
 # TODO загрузка по фильмам - ОК
 # TODO backoff - эластик ОК, сделать для постгри
+# TODO backoff - передавать в декоратор список эксепшенов для каждого метода (че с ним делать дальше?)
+# TODO backoff - считать среднее кол-во обратываемых запросов в день для мониторинга работы ETL, уведомлять при большой дельте от среднего числа
 # TODO redis (хранить состояние) -
 # TODO упаковка в докер
 
 
-def backoff(start_sleep_time=0.1, factor=2, border_sleep_time=100):
+# TODO: добавить jitter в бэкофф
+def backoff(exceptions: tuple, start_sleep_time=0.1, factor=2, border_sleep_time=100):
     """
     Функция для повторного выполнения функции через некоторое время, если возникла ошибка.
     Использует наивный экспоненциальный рост времени повтора (factor) до граничного времени ожидания (border_sleep_time)
@@ -67,10 +78,31 @@ def backoff(start_sleep_time=0.1, factor=2, border_sleep_time=100):
             while delay < border_sleep_time:
                 try:
                     return func(*args, **kwargs)
-                except Exception as e: # TODO конкретные исключения эластик и постгри
+                except exceptions as e:
                     print(f'waiting {delay} seconds before retry')
                     time.sleep(delay)
                     delay = delay * factor
+            return func(*args, **kwargs)
+        return inner
+    return func_wrapper
+
+
+# TODO  протестить реконнекты к базе, определить откуда продолжается выгрузка данных из БД
+def db_reconnect(start_sleep_time=0.1, factor=2, border_sleep_time=100):
+    def func_wrapper(func):
+        @wraps(func)
+        def inner(*args, **kwargs):
+            delay = start_sleep_time * factor
+            if args[0].pg_conn.closed != 0:
+                while delay < border_sleep_time:
+                    try:
+                        pg_conn = psycopg2.connect(**dsl, cursor_factory=DictCursor)
+                        args[0].pg_conn = pg_conn
+                        return func(*args, **kwargs)
+                    except psycopg2.Error:
+                        print(f'waiting {delay} seconds before retry')
+                        time.sleep(delay)
+                        delay = delay * factor
             return func(*args, **kwargs)
         return inner
     return func_wrapper
@@ -82,12 +114,16 @@ class ProtoUpdater:
     genres_last_update: str = default_last_update_time
     films_last_update: str = default_last_update_time
     already_updated_films = []
+    pg_conn: _connection
 
     def __init__(self, pg_conn: _connection):
         self.pg_conn = pg_conn
 
+    @backoff(exceptions=(psycopg2.InterfaceError, psycopg2.OperationalError))
+    @db_reconnect()
     def extract_selected_films(self, selected_films: tuple[Any]):
         """Достаем выбранные фильмы со всеми данными"""
+        # cur = self.pg_conn.cursor()
         cur = self.pg_conn.cursor()
         cur.execute(
             f"SELECT "
@@ -142,7 +178,7 @@ class ProtoUpdater:
         return payload_data
 
     @staticmethod
-    @backoff()
+    @backoff(exceptions=(ConnectionError,))
     def load_data_to_elasticsearch(payload_data):
         url = 'http://127.0.0.1:9200/_bulk?filter_path=items.*.error'
         headers = {'content-type': 'application/x-ndjson'}
@@ -166,7 +202,10 @@ class ProtoUpdater:
 class UpdateByPerson(ProtoUpdater):
     needs_to_update: bool = True
     limit_rows = 100  # TODO Debug
+    # pg_conn: _connection
 
+    @backoff(exceptions=(psycopg2.InterfaceError, psycopg2.OperationalError))
+    @db_reconnect()
     def extract_persons_data(self) -> tuple[str] | None:
         """Достаем всех person у которых менялись данные (по дате обновления)"""
         cur = self.pg_conn.cursor()
@@ -206,6 +245,8 @@ class UpdateByGenre(ProtoUpdater):
     needs_to_update: bool = True
     limit_obj_per_fetch = 100
 
+    @backoff(exceptions=(psycopg2.InterfaceError, psycopg2.OperationalError))
+    @db_reconnect()
     def extract_genres_data(self) -> tuple[str] | None:  # TODO rename
         cur = self.pg_conn.cursor()
         cur.execute(
@@ -219,7 +260,6 @@ class UpdateByGenre(ProtoUpdater):
             self.needs_to_update = False
             return
         genres_id = tuple(genre[0] for genre in genres)
-        self.genres_last_update = genres[-1]['updated_at']
 
         # достаем фильмы с указанными жанрами
         cur.execute(
@@ -230,6 +270,7 @@ class UpdateByGenre(ProtoUpdater):
             f'GROUP BY fw.id '
             f"ORDER BY fw.updated_at "
         )
+        self.genres_last_update = genres[-1]['updated_at']
         while data := cur.fetchmany(self.limit_obj_per_fetch):
             selected_films = self._check_if_film_already_updated(data)
             if not selected_films:
@@ -243,8 +284,9 @@ class UpdateByGenre(ProtoUpdater):
 class UpdateByFilm(ProtoUpdater):
     needs_to_update: bool = True
     limit_rows = 100
-    limit_obj_per_fetch = 100
 
+    @backoff(exceptions=(psycopg2.InterfaceError, psycopg2.OperationalError))
+    @db_reconnect()
     def extract_films_data(self) -> tuple[str] | None:  # TODO rename
         cur = self.pg_conn.cursor()
         cur.execute(
@@ -255,11 +297,11 @@ class UpdateByFilm(ProtoUpdater):
             f"LIMIT {self.limit_rows} "
         )
         films = cur.fetchall()
-        self.films_last_update = films[-1]['updated_at']
         selected_films = self._check_if_film_already_updated(films)
         if not selected_films:
             self.needs_to_update = False
             return
+        self.films_last_update = films[-1]['updated_at']
         return selected_films
 
 
@@ -271,10 +313,11 @@ def main():
         'host': os.environ.get('DB_HOST'),
         'port': os.environ.get('DB_PORT'),
     }
-    with closing(psycopg2.connect(**dsl, cursor_factory=DictCursor)) as pg_conn:  # noqa E501
+    with closing(psycopg2.connect(**dsl, cursor_factory=DictCursor)) as pg_conn:
         update_by_person = UpdateByPerson(pg_conn)
-        update_by_genre = UpdateByGenre(pg_conn)
-        update_by_film = UpdateByFilm(pg_conn)
+        update_by_genre = UpdateByGenre(pg_conn) # TODO что если предыдущий конн уже закрылся, а актуальный коннект лежит в протоклассе. Можно ли хранить актуальный коннект в редис
+        # update_by_film = UpdateByFilm(pg_conn)
+
         print('запускаем апдейт персоналий')
         while update_by_person.needs_to_update is True:
             if selected_films := update_by_person.extract_persons_data():
@@ -283,22 +326,32 @@ def main():
                 update_by_person.load_data_to_elasticsearch(payload_data)
             else:
                 print('log: no persons to update')
+
         print('запускаем апдейт жанров')
+        # check_if_db_was_reconnected()
         while update_by_genre.needs_to_update is True:
             update_by_genre.extract_genres_data()
         print('log: no genres to update')
 
-        print('запускаем апдейт фильмов')
-        while update_by_film.needs_to_update is True:
-            if selected_films := update_by_film.extract_films_data():
-                film_data = update_by_film.extract_selected_films(selected_films)
-                payload_data = update_by_film.prepare_data_to_load(film_data)
-                update_by_film.load_data_to_elasticsearch(payload_data)
-            else:
-                print('log: no films to update')
-        print('all objects were updated. Next update start in ...')
-        update_by_film.already_updated_films.clear()
+        # print('запускаем апдейт фильмов')
+        # while update_by_film.needs_to_update is True:
+        #     if selected_films := update_by_film.extract_films_data():
+        #         film_data = update_by_film.extract_selected_films(selected_films)
+        #
+        #         payload_data = update_by_film.prepare_data_to_load(film_data)
+        #         update_by_film.load_data_to_elasticsearch(payload_data)
+        #     else:
+        #         print('log: no films to update')
+        # print('all objects were updated. Next update start in ...')
+        #
+        # update_by_film.already_updated_films.clear()
 
+# def check_if_db_was_reconnected(prev_updater, next_updater) -> bool:
+#     if update_by_genre.pg_conn != update_by_person.pg_conn:  # если разорвался коннект в предыдущем апдейте, и был создан новый.
+#         update_by_genre.pg_conn = update_by_person.pg_conn  # то в следующем апдейте используем созданный коннект
+#
 
 if __name__ == '__main__':
     main()
+
+# TODO вывести код из мейн в отдельные функкции
