@@ -2,6 +2,7 @@ import datetime
 import json
 import logging
 import os
+import random
 import sys
 import time
 from contextlib import closing
@@ -77,6 +78,7 @@ def backoff(exceptions: tuple, start_sleep_time=0.1, factor=2, border_sleep_time
     def func_wrapper(func):
         @wraps(func)
         def inner(*args, **kwargs):
+            attemp = 0
             delay = start_sleep_time * factor
             logger = args[0].logger
             while delay < border_sleep_time:
@@ -85,7 +87,13 @@ def backoff(exceptions: tuple, start_sleep_time=0.1, factor=2, border_sleep_time
                 except exceptions:
                     logger.info(f'Ждем {delay} секунд для повторения запроса')
                     time.sleep(delay)
-                    delay = delay * factor
+                    # delay = delay * factor
+                    # delay =  min(border_sleep_time, random.uniform(start_sleep_time, delay *3)
+                    attemp += 1
+                    temp = min(border_sleep_time, start_sleep_time * 2 ** attemp)
+                    delay = temp / 2 + random.uniform(0, temp / 2)  # TODO проверить как работает с джиттером
+                    # delay = random.uniform(delay, factor)
+
             return func(*args, **kwargs)
 
         return inner
@@ -280,8 +288,8 @@ class UpdateByGenre(ProtoUpdater):
     @db_reconnect()
     def extract_and_load_genres_data(self) -> None:
         """
-        Извлекаем из БД все жанры, у которых изменились данные с момента последнего обновления.
-        Т.к. изменение жанров касается большого количества фильмов, важно извлекать объекты из БД частями,
+        Метод извлекает из БД все объекты жанров, у которых изменились данные с момента последнего обновления.
+        Т.к. изменение жанров всегда касается большого количества фильмов, важно извлекать объекты из БД частями,
         и сразу же подгружать обновленные данные в ElasticSearch.
         """
         cur = self.pg_conn.cursor()
