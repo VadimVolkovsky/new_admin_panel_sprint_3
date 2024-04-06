@@ -56,14 +56,12 @@ class Film:
     description: str | None = pydantic.Field(default='Description in progress...')
 
 
-# TODO считать среднее кол-во обратываемых запросов в день для мониторинга работы ETL, уведомлять при большой дельте от среднего числа  # noqa E501
 # TODO упаковка в докер
 
 
-# # TODO: добавить jitter в бэкофф
 def backoff(exceptions: tuple, start_sleep_time=0.1, factor=2, border_sleep_time=100):
     """
-    Функция для повторного выполнения функции через некоторое время, если возникла ошибка.
+    Декоратор для повторного выполнения функции через некоторое время, если возникла ошибка.
     Использует наивный экспоненциальный рост времени повтора (factor) до граничного времени ожидания (border_sleep_time)
 
     Формула:
@@ -78,41 +76,39 @@ def backoff(exceptions: tuple, start_sleep_time=0.1, factor=2, border_sleep_time
     def func_wrapper(func):
         @wraps(func)
         def inner(*args, **kwargs):
-            attemp = 0
+            attempt = 0
+            max_attempt = 100
             delay = start_sleep_time * factor
             logger = args[0].logger
-            while delay < border_sleep_time:
+            while delay < border_sleep_time and attempt < max_attempt:
                 try:
                     return func(*args, **kwargs)
                 except exceptions:
                     logger.info(f'Ждем {delay} секунд для повторения запроса')
                     time.sleep(delay)
-                    # delay = delay * factor
-                    # delay =  min(border_sleep_time, random.uniform(start_sleep_time, delay *3)
-                    attemp += 1
-                    temp = min(border_sleep_time, start_sleep_time * 2 ** attemp)
-                    delay = temp / 2 + random.uniform(0, temp / 2)  # TODO проверить как работает с джиттером
-                    # delay = random.uniform(delay, factor)
-
+                    attempt += 1
+                    temp = min(border_sleep_time, start_sleep_time * 2 ** attempt)
+                    delay = temp / 2 + random.uniform(0, temp / 2)
             return func(*args, **kwargs)
-
         return inner
     return func_wrapper
 
 
 def db_reconnect(start_sleep_time=0.1, factor=2, border_sleep_time=100):
     """
-    Функция для проверки актуальности подключения к БД.
+    Декоратор для проверки актуальности подключения к БД.
     В случае разрыва соединения, создается новое подключюние к БД.
     """
 
     def func_wrapper(func):
         @wraps(func)
         def inner(*args, **kwargs):
+            attempt = 0
+            max_attempt = 100
             delay = start_sleep_time * factor
             logger = args[0].logger
             if args[0].pg_conn.closed != 0:
-                while delay < border_sleep_time:
+                while delay < border_sleep_time and attempt < max_attempt:
                     try:
                         pg_conn = psycopg2.connect(**dsl, cursor_factory=DictCursor)
                         args[0].pg_conn = pg_conn
@@ -120,7 +116,9 @@ def db_reconnect(start_sleep_time=0.1, factor=2, border_sleep_time=100):
                     except psycopg2.Error:
                         logger.info(f'Ждем {delay} секунд для повторения запроса')
                         time.sleep(delay)
-                        delay = delay * factor
+                        attempt += 1
+                        temp = min(border_sleep_time, start_sleep_time * 2 ** attempt)
+                        delay = temp / 2 + random.uniform(0, temp / 2)
             return func(*args, **kwargs)
         return inner
     return func_wrapper
@@ -266,10 +264,6 @@ class UpdateByPerson(ProtoUpdater):
         data = cur.fetchall()
 
         self.redis.set('persons_last_update', str(persons[-1]['updated_at']))
-        # selected_films = self._check_if_film_already_updated(data)
-        # if not selected_films:
-        #     self.needs_to_update = False
-        #     return None
         selected_films = []
         for film in data:
             selected_films.append(film[0])
@@ -316,10 +310,6 @@ class UpdateByGenre(ProtoUpdater):
         )
         self.redis.set('genres_last_update', str(genres[-1]['updated_at']))
         while data := cur.fetchmany(self.limit_obj_per_fetch):
-            # selected_films = self._check_if_film_already_updated(data)
-            # if not selected_films:
-            #     self.needs_to_update = False
-            #     return
             selected_films = []
             for film in data:
                 selected_films.append(film[0])
@@ -353,10 +343,6 @@ class UpdateByFilm(ProtoUpdater):
             f"LIMIT {self.limit_rows} "
         )
         films = cur.fetchall()
-        # selected_films = self._check_if_film_already_updated(films)
-        # if not selected_films:
-        #     self.needs_to_update = False
-        #     return None
         selected_films = []
         for film in films:
             selected_films.append(film[0])

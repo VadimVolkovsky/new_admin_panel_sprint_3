@@ -1,0 +1,64 @@
+version: '3'
+services:
+
+#  sprint_3_postgres:
+#    image: postgres:14.11.0-alpine
+#    ports:
+#      - "5435:5432"
+#    volumes:
+#      - postgres_data:/var/lib/postgresql/data/
+#    env_file:
+#      - ./.env
+#    container_name: sprint_3_postgres
+#    networks:
+#      - my_practicum_network
+
+  sprint_3_redis:
+    image: redis/redis-stack:latest
+    ports:
+      - "6380:6379"
+#    healthcheck:
+#      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+    volumes:
+      - redis_data:/redis_data
+    env_file:
+      - ./.env
+    container_name: sprint_3_redis
+    networks:
+      - my_practicum_network
+#
+#  sprint_3_elastic_search:
+#    image: elasticsearch:8.6.2
+#    ports:
+#      - "9200:9200"
+#    volumes:
+#      - elastic_search_data:/elastic_search_data
+#    env_file:
+#      - ./.env
+#    container_name: sprint_3_elastic_search
+#    networks:
+#      - my_practicum_network
+
+#  sprint_3_app:
+#    build: ./postgres_to_es
+#    ports:
+#      - "0:8000"
+#    depends_on:
+#      - sprint_3_postgres
+#      - sprint_3_redis
+#      - sprint_3_elastic_search
+#    networks:
+#      - my_practicum_network
+#    container_name: sprint_3_app
+
+volumes:
+  postgres_data:
+  redis_data:
+  elastic_search_data:
+
+networks:
+  my_practicum_network:
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.16.58.0/24
