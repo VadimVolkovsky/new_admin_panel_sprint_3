@@ -35,7 +35,7 @@ redis_connection = {
 }
 
 # update_period = 21600  # каждые 6 часов
-update_period = 30
+update_period = 30  # каждые 30 сек
 
 
 @dataclass
@@ -54,9 +54,6 @@ class Film:
     directors_names: list[str] = pydantic.Field(default=[])
     actors_names: list[str] = pydantic.Field(default=[])
     description: str | None = pydantic.Field(default='Description in progress...')
-
-
-# TODO упаковка в докер
 
 
 def backoff(exceptions: tuple, start_sleep_time=0.1, factor=2, border_sleep_time=100):
@@ -83,7 +80,8 @@ def backoff(exceptions: tuple, start_sleep_time=0.1, factor=2, border_sleep_time
             while delay < border_sleep_time and attempt < max_attempt:
                 try:
                     return func(*args, **kwargs)
-                except exceptions:
+                except exceptions as e:
+                    logger.info(e)
                     logger.info(f'Ждем {delay} секунд для повторения запроса')
                     time.sleep(delay)
                     attempt += 1
@@ -113,7 +111,8 @@ def db_reconnect(start_sleep_time=0.1, factor=2, border_sleep_time=100):
                         pg_conn = psycopg2.connect(**dsl, cursor_factory=DictCursor)
                         args[0].pg_conn = pg_conn
                         return func(*args, **kwargs)
-                    except psycopg2.Error:
+                    except psycopg2.Error as e:
+                        logger.info(e)
                         logger.info(f'Ждем {delay} секунд для повторения запроса')
                         time.sleep(delay)
                         attempt += 1
@@ -208,7 +207,9 @@ class ProtoUpdater:
     @backoff(exceptions=(requests.ConnectionError,))
     def load_data_to_elasticsearch(self, payload_data):
         """Загрузка данных в ElasticSearch"""
-        url = 'http://127.0.0.1:9200/_bulk?filter_path=items.*.error'
+        elastic_host = os.environ.get('ELASTIC_HOST')
+        elastic_port = os.environ.get('ELASTIC_PORT')
+        url = f'{elastic_host}:{elastic_port}/_bulk?filter_path=items.*.error'
         headers = {'content-type': 'application/x-ndjson'}
         response = requests.post(url, data=payload_data, headers=headers)
         if not response.status_code == 200:
@@ -230,7 +231,7 @@ class ProtoUpdater:
 class UpdateByPerson(ProtoUpdater):
     """Класс для проверки и обновления данных по персоналиям"""
     needs_to_update: bool = True
-    limit_rows = 100  # TODO Debug
+    limit_rows = 100
 
     @backoff(exceptions=(psycopg2.InterfaceError, psycopg2.OperationalError))
     @db_reconnect()
