@@ -2,12 +2,11 @@ FROM python:3.12
 
 WORKDIR /opt/app
 
-COPY requirements.txt requirements.txt
+COPY postgres_to_es/requirements.txt requirements.txt
 
 RUN  pip install --upgrade pip \
      && pip install -r requirements.txt --no-cache-dir
 
-COPY . .
+COPY postgres_to_es .
 
-#CMD ["bash", "deploy.sh"]
-CMD ["python", "data_loader.py"]
+CMD ["python", "app.py"]
