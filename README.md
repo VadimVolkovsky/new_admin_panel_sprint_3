@@ -10,7 +10,7 @@
 
 Создайте файл окружения с тестовыми данными:
 ```
-touch .env & echo "POSTGRES__DBNAME=movies_database
+touch postgres_to_es/.env & echo "POSTGRES__DBNAME=movies_database
 POSTGRES__USER=app
 POSTGRES__PASSWORD=123qwe
 POSTGRES__HOST=sprint_3_postgres
